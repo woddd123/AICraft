@@ -1,0 +1,6 @@
+{
+  "name": "NovelCraft AI",
+  "description": "An AI-powered novel generation and reading platform with PWA support, featuring writing, reading, and user profile management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
