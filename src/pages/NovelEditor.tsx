@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { MOCK_NOVELS, Novel, Chapter } from '../lib/mockData';
 import { Menu, Settings, Image as ImageIcon, FileText, ChevronLeft, ChevronRight, Plus, Eye, Save, Loader2, Library, Sparkles, Send, X, Bot, Trash2 } from 'lucide-react';
@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { Link } from 'react-router-dom';
 import { useUser } from '@clerk/clerk-react';
+import { loadSettings, buildAiParams } from '../lib/apiSettings';
 
 const AGENTS = [
   { id: 'worldbuilding', name: '世界观', icon: '🌍', desc: '设定世界规则、势力、等级体系等' },
@@ -160,9 +161,15 @@ export function NovelEditor() {
 
   const handleAiSubmit = async () => {
     if (!aiPrompt.trim() || isAiGenerating) return;
-    
+
     if (novel.id === 'new') {
       alert("请先在左侧输入小说标题等待自动保存（生成小说id）后，再进行对话！");
+      return;
+    }
+
+    const settings = loadSettings();
+    if (!settings) {
+      alert("请先在「我的」页面配置 API Key 和模型");
       return;
     }
 
@@ -218,13 +225,18 @@ export function NovelEditor() {
       contextStr += `\n\n注意：用户刚刚在消息中使用了 \`@\` 提及了某位编辑，请被\@到的编辑优先响应、重点回应，其他编辑可作为辅助。`;
     }
 
+    const aiParams = buildAiParams(settings);
+
     try {
       const response = await fetch('/api/ai/groupchat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           generateContext: contextStr,
-          messages: [...chatMessages, userMessage]
+          messages: [...chatMessages, userMessage],
+          apiKey: aiParams.apiKey,
+          baseURL: aiParams.baseURL,
+          model: aiParams.model,
         })
       });
 
@@ -624,7 +636,38 @@ export function NovelEditor() {
                        </div>
                      )}
                   </div>
-                  <button className="w-full py-2 border border-[#5a5a40] text-[#5a5a40] rounded-full text-xs hover:bg-[#5a5a40] hover:text-white transition-colors">
+                  <button
+                    onClick={async () => {
+                      const settings = loadSettings();
+                      if (!settings) {
+                        alert("请先在「我的」页面配置 API Key");
+                        return;
+                      }
+                      const params = buildAiParams(settings);
+                      try {
+                        const res = await fetch('/api/ai/generate-cover', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            title: novel.title,
+                            description: novel.description,
+                            apiKey: params.apiKey,
+                            baseURL: params.baseURL,
+                            model: params.model,
+                          })
+                        });
+                        const data = await res.json();
+                        if (data.error) {
+                          alert("生成失败：" + data.error);
+                        } else {
+                          alert("封面 Prompt 已生成：\n\n" + data.prompt);
+                        }
+                      } catch (e) {
+                        alert("请求失败，请检查网络或 API Key");
+                      }
+                    }}
+                    className="w-full py-2 border border-[#5a5a40] text-[#5a5a40] rounded-full text-xs hover:bg-[#5a5a40] hover:text-white transition-colors"
+                  >
                     AI 生成封面
                   </button>
                 </div>

@@ -11,12 +11,6 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
 
-  const customApiKey = "sk-6b9815cca6754e458b0c21095c9aeeb7";
-  const ai = new OpenAI({
-    apiKey: customApiKey || process.env.GEMINI_API_KEY,
-    baseURL: "https://api.deepseek.com/v1"
-  });
-
   // Initialize Turso DB connection
   let db: ReturnType<typeof createClient> | null = null;
   const dbUrl = process.env.TURSO_DATABASE_URL;
@@ -97,6 +91,34 @@ async function startServer() {
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", usingDb: !!db });
+  });
+
+  app.post("/api/ai/models", async (req, res) => {
+    const { baseURL, apiKey } = req.body;
+    if (!baseURL || !apiKey) {
+      return res.status(400).json({ error: "baseURL and apiKey required" });
+    }
+    try {
+      const resp = await fetch(`${baseURL}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      if (!resp.ok) {
+        return res.status(resp.status).json({ error: `API returned ${resp.status}` });
+      }
+      const data = await resp.json() as any;
+      const models = (data.data || [])
+        .map((m: any) => ({ id: m.id, name: m.id }))
+        .filter((m: any) => {
+          const id = m.id.toLowerCase();
+          // Filter out non-chat models
+          return !id.includes('embedding') && !id.includes('tts') && !id.includes('whisper')
+            && !id.includes('dall-e') && !id.includes('moderation') && !id.includes('babbage')
+            && !id.includes('davinci') && !id.includes('audio');
+        });
+      res.json({ models });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   app.get("/api/novels", async (req, res) => {
@@ -291,11 +313,20 @@ async function startServer() {
   });
 
   app.post("/api/ai/copilot", async (req, res) => {
-    if (!ai) {
-      return res.status(500).json({ error: "Gemini API key is not configured." });
+    const { generateContext, agentRole, apiKey, baseURL, model } = req.body;
+
+    const clientKey = apiKey || process.env.DEEPSEEK_API_KEY;
+    const clientBaseURL = baseURL || "https://api.deepseek.com/v1";
+    const clientModel = model || "deepseek-chat";
+
+    if (!clientKey) {
+      return res.status(500).json({ error: "API key is not configured." });
     }
 
-    const { generateContext, agentRole } = req.body;
+    const client = new OpenAI({
+      apiKey: clientKey,
+      baseURL: clientBaseURL,
+    });
 
     let systemInstruction = "你是优秀的小说AI助手。";
     switch (agentRole) {
@@ -328,8 +359,8 @@ async function startServer() {
     res.flushHeaders();
 
     try {
-      const responseStream = await ai.chat.completions.create({
-        model: "deepseek-chat",
+      const responseStream = await client.chat.completions.create({
+        model: clientModel,
         messages: [
           { role: "system", content: systemInstruction },
           { role: "user", content: generateContext || "你好" }
@@ -353,12 +384,55 @@ async function startServer() {
     }
   });
 
-  app.post("/api/ai/groupchat", async (req, res) => {
-    if (!ai) {
-      return res.status(500).json({ error: "Gemini API key is not configured." });
+  app.post("/api/ai/generate-cover", async (req, res) => {
+    const { title, description, apiKey, baseURL, model } = req.body;
+
+    const clientKey = apiKey || process.env.DEEPSEEK_API_KEY;
+    const clientBaseURL = baseURL || "https://api.deepseek.com/v1";
+    const clientModel = model || "deepseek-chat";
+
+    if (!clientKey) {
+      return res.status(500).json({ error: "API key is not configured." });
     }
 
-    const { messages, generateContext } = req.body;
+    const client = new OpenAI({
+      apiKey: clientKey,
+      baseURL: clientBaseURL,
+    });
+
+    try {
+      const prompt = `为以下小说生成一段封面设计的英文Prompt（用于AI图片生成），要求简洁有画面感，不超过100个单词：\n\n标题：${title}\n简介：${description}\n\n直接输出prompt，不要其他内容。`;
+
+      const result = await client.chat.completions.create({
+        model: clientModel,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.9,
+        max_tokens: 200,
+      });
+
+      const coverPrompt = result.choices[0]?.message?.content?.trim() || "";
+      res.json({ prompt: coverPrompt });
+    } catch (err: any) {
+      console.error("Cover generation error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/ai/groupchat", async (req, res) => {
+    const { messages, generateContext, apiKey, baseURL, model } = req.body;
+
+    const clientKey = apiKey || process.env.DEEPSEEK_API_KEY;
+    const clientBaseURL = baseURL || "https://api.deepseek.com/v1";
+    const clientModel = model || "deepseek-chat";
+
+    if (!clientKey) {
+      return res.status(500).json({ error: "API key is not configured." });
+    }
+
+    const client = new OpenAI({
+      apiKey: clientKey,
+      baseURL: clientBaseURL,
+    });
 
     const systemInstruction = `你现在是一个网文创制全息工作室模拟器。
 工作室由7位AI成员和1位用户构成：
@@ -378,8 +452,8 @@ async function startServer() {
 3. 工作流如下：
    - 收到用户需求后，【进度编辑】首先发言，拆解需求并@对应成员。
    - 被分配任务的成员进行专业分析和讨论，互相碰撞。
-   - 讨论充分后，【进度编辑】出面总结，并给出一份《最终执行方案》，并询问用户“是否通过本方案？”。
-4. 如果用户回复“通过”或明确同意，【进度编辑】会宣布开始执行，接着所有相关的编辑依次以
+   - 讨论充分后，【进度编辑】出面总结，并给出一份《最终执行方案》，并询问用户"是否通过本方案？"。
+4. 如果用户回复"通过"或明确同意，【进度编辑】会宣布开始执行，接着所有相关的编辑依次以
 [角色名]: 内容
 格式给出他们最终生成的小说内容。为了能够自动更新写作界面，负责具体内容的编辑（如【正文执笔】等）可以直接在内容中输出如下特殊XML标签（必须独立成段）：
 
@@ -403,8 +477,8 @@ async function startServer() {
       const historyStr = messages.map((m: any) => m.sender === 'user' ? `[用户]: ${m.text}` : `[${m.sender}]: ${m.text}`).join('\n\n');
       const finalPrompt = `以下是小说的上下文信息：\n${generateContext || '(空)'}\n\n以下是群聊记录：\n${historyStr}\n\n请继续接着群聊记录往下模拟发言：`;
 
-      const responseStream = await ai.chat.completions.create({
-        model: "deepseek-chat",
+      const responseStream = await client.chat.completions.create({
+        model: clientModel,
         messages: [
           { role: "system", content: systemInstruction },
           { role: "user", content: finalPrompt }
