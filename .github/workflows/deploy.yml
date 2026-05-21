@@ -1,0 +1,106 @@
+name: Deploy to ECS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest
+          build-args: |
+            GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+            VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
+
+      - name: Deploy to ECS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: ${{ secrets.ECS_USER }}
+          key: ${{ secrets.ECS_SSH_KEY }}
+          script: |
+            set -e
+
+            # ===== 1. 安装 Docker =====
+            if ! command -v docker &> /dev/null; then
+              echo ">>> Installing Docker..."
+              yum install -y docker
+              systemctl enable docker
+              systemctl start docker
+            fi
+
+            # ===== 2. 安装 Nginx =====
+            if ! command -v nginx &> /dev/null; then
+              echo ">>> Installing Nginx..."
+              yum install -y nginx
+            fi
+
+            # ===== 3. 写入 Nginx 配置 =====
+            cat > /etc/nginx/nginx.conf << 'NGINX'
+            events { worker_connections 1024; }
+            http {
+              include /etc/nginx/mime.types;
+              server {
+                listen 80;
+                server_name _;
+                client_max_body_size 50m;
+                location / {
+                  proxy_pass http://localhost:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_buffering off;
+                  proxy_read_timeout 300s;
+                  proxy_send_timeout 300s;
+                }
+              }
+            }
+            NGINX
+            systemctl enable nginx
+            systemctl restart nginx
+
+            # ===== 4. 写入应用环境变量 =====
+            cat > /root/aicraft.env << ENVEOF
+            DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}
+            TURSO_DATABASE_URL=${{ secrets.TURSO_DATABASE_URL }}
+            TURSO_AUTH_TOKEN=${{ secrets.TURSO_AUTH_TOKEN }}
+            CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
+            APP_URL=${{ secrets.APP_URL }}
+            ENVEOF
+
+            # ===== 5. 部署容器 =====
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ghcr.io/${{ github.repository }}:latest
+            docker stop aicraft || true
+            docker rm aicraft || true
+            docker run -d --name aicraft \
+              -p 3000:3000 \
+              --env-file /root/aicraft.env \
+              --restart unless-stopped \
+              ghcr.io/${{ github.repository }}:latest
+            docker logout ghcr.io
+            echo ">>> Deploy done."
